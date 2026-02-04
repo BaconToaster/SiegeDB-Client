@@ -84,6 +84,7 @@ namespace http {
         curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl_, CURLOPT_WRITEDATA, &response_body);
+        curl_easy_setopt(curl_, CURLOPT_UPLOAD_BUFFERSIZE, 2L * 1024 * 1024);
 
         struct curl_slist* headers = nullptr;
         if (raw_data) {

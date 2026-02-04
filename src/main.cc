@@ -3,9 +3,7 @@
 #include "siegedb/siegedb.hh"
 
 int main() {
-    auto siegedb = siegedb::SiegeDB::New(
-        "http://localhost:3000/api",
-        "cfc94a0627246f25858d6e7f7e81a8534c11fae3d7d82989605f60d5ddf78f6c");
+    auto siegedb = siegedb::SiegeDB::New("API_URL", "TOKEN");
     if (!siegedb) {
         printf("Failed to initialize SiegeDB\n");
         return 1;
