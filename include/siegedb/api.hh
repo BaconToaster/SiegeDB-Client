@@ -63,6 +63,14 @@ namespace siegedb {
                           size_t size, std::string& new_job_id);
         StatusResponse GetStatus(const std::string& job_id);
 
+        std::optional<std::string> InitUpload(
+            const std::string& upload_token, uint32_t chunk_total);
+        bool UploadChunk(const std::string& upload_id, uint32_t chunk_index,
+                         const uint8_t* data, size_t size);
+
+        std::string GetAuthHeader() const;
+        std::string GetUrl() const;
+
     private:
         Api();
 
@@ -72,7 +80,7 @@ namespace siegedb {
         http::Response Post(const std::string& endpoint,
                             const nlohmann::json& body);
         http::Response PostRaw(const std::string& endpoint, const uint8_t* data,
-                               size_t size);
+                               size_t size, bool compressed = false);
 
         std::unique_ptr<http::Http> http_;
         std::string url_;

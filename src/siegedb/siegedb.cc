@@ -8,16 +8,21 @@
 #include <memoryapi.h>
 #include <processthreadsapi.h>
 #include <winnt.h>
+#include <zlib.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "siegedb/api.hh"
+
+#undef min
 
 namespace siegedb {
     std::unique_ptr<SiegeDB> SiegeDB::New(const std::string& api_url,
@@ -72,17 +77,125 @@ namespace siegedb {
                     return nullptr;
                 }
                 std::vector<uint8_t> dump;
-                if (!ReadDump(dump)) {
+                if (!ReadSections(dump)) {
                     printf(
                         "[siegedb::SiegeDB::GetOffsets] failed to read "
-                        "process dump\n");
+                        "process sections\n");
                     return nullptr;
                 }
+                std::vector<uint8_t> compressed;
+                if (!Compress(dump, compressed)) {
+                    printf(
+                        "[siegedb::SiegeDB::GetOffsets] failed to compress "
+                        "dump\n");
+                    return nullptr;
+                }
+                printf(
+                    "[siegedb::SiegeDB::GetOffsets] compressed %.1f MB -> "
+                    "%.1f MB\n",
+                    static_cast<double>(dump.size()) / (1024.0 * 1024.0),
+                    static_cast<double>(compressed.size()) / (1024.0 * 1024.0));
+                dump.clear();
+                dump.shrink_to_fit();
+
+                constexpr size_t kMaxSingleUpload = 50ULL * 1024 * 1024;
                 std::string job_id;
-                if (!api_->Upload(*response.upload_token, dump.data(),
-                                  dump.size(), job_id)) {
-                    return nullptr;
+
+                if (compressed.size() <= kMaxSingleUpload) {
+                    // Single-chunk upload (existing path)
+                    if (!api_->Upload(*response.upload_token, compressed.data(),
+                                      compressed.size(), job_id)) {
+                        return nullptr;
+                    }
+                } else {
+                    // Chunked parallel upload
+                    constexpr size_t kMaxChunkSize = 50ULL * 1024 * 1024;
+                    uint32_t chunk_count = static_cast<uint32_t>(
+                        (compressed.size() + kMaxChunkSize - 1) /
+                        kMaxChunkSize);
+                    size_t chunk_size =
+                        (compressed.size() + chunk_count - 1) / chunk_count;
+
+                    printf(
+                        "[upload] splitting into %u chunks of ~%.1f MB\n",
+                        chunk_count,
+                        chunk_size / (1024.0 * 1024.0));
+
+                    auto upload_id =
+                        api_->InitUpload(*response.upload_token, chunk_count);
+                    if (!upload_id) {
+                        printf(
+                            "[siegedb::SiegeDB::GetOffsets] "
+                            "InitUpload failed\n");
+                        return nullptr;
+                    }
+                    printf("[upload] upload_id: %s\n", upload_id->c_str());
+
+                    std::atomic<bool> any_failed{false};
+                    std::vector<std::thread> threads;
+                    std::string auth_header = api_->GetAuthHeader();
+                    std::string base_url = api_->GetUrl();
+                    std::string captured_job_id;
+                    std::mutex job_id_mutex;
+
+                    for (uint32_t i = 0; i < chunk_count; i++) {
+                        size_t offset = static_cast<size_t>(i) * chunk_size;
+                        size_t chunk_sz = std::min(
+                            chunk_size, compressed.size() - offset);
+                        const uint8_t* chunk_ptr = compressed.data() + offset;
+
+                        threads.emplace_back([&any_failed, &auth_header,
+                                              &base_url, chunk_ptr, chunk_sz, i,
+                                              &upload_id, &captured_job_id,
+                                              &job_id_mutex]() {
+                            auto http = http::Http::New();
+                            if (!http) {
+                                any_failed = true;
+                                return;
+                            }
+                            // Parse "Authorization: Bearer <token>"
+                            auto colon = auth_header.find(": ");
+                            if (colon != std::string::npos) {
+                                http->SetHeader(auth_header.substr(0, colon),
+                                                auth_header.substr(colon + 2));
+                            }
+                            std::string url = base_url + "/upload/" +
+                                              *upload_id + "/" +
+                                              std::to_string(i);
+                            auto res =
+                                http->PostRaw(url, chunk_ptr, chunk_sz, false);
+                            if (!res.error.empty() ||
+                                (res.status_code != 200 &&
+                                 res.status_code != 202)) {
+                                printf(
+                                    "\n[upload] chunk %u failed: "
+                                    "%s\n",
+                                    i,
+                                    res.error.empty() ? "unexpected status"
+                                                      : res.error.c_str());
+                                any_failed = true;
+                            } else if (res.body.contains("job_id")) {
+                                std::lock_guard<std::mutex> lock(job_id_mutex);
+                                captured_job_id =
+                                    res.body.value("job_id", "");
+                            }
+                        });
+                    }
+
+                    for (auto& t : threads) {
+                        t.join();
+                    }
+
+                    if (any_failed) {
+                        printf(
+                            "[siegedb::SiegeDB::GetOffsets] "
+                            "chunked upload failed\n");
+                        return nullptr;
+                    }
+
+                    job_id = captured_job_id;
                 }
+
                 nlohmann::json result;
                 if (PollUntilDone(job_id, timestamp, query, result)) {
                     return result;
@@ -105,9 +218,15 @@ namespace siegedb {
                         "regions\n");
                     return nullptr;
                 }
+                std::vector<uint8_t> compressed;
+                if (!Compress(regions, compressed)) {
+                    return nullptr;
+                }
+                regions.clear();
+                regions.shrink_to_fit();
                 std::string new_job_id;
-                if (!api_->UploadMemory(response.job_id, regions.data(),
-                                        regions.size(), new_job_id)) {
+                if (!api_->UploadMemory(response.job_id, compressed.data(),
+                                        compressed.size(), new_job_id)) {
                     return nullptr;
                 }
                 nlohmann::json result;
@@ -124,14 +243,50 @@ namespace siegedb {
     bool SiegeDB::PollUntilDone(const std::string& job_id, uint32_t timestamp,
                                 const std::string& query,
                                 nlohmann::json& result) {
-        // If no job_id, just re-poll offsets after a delay
+        // If no job_id, poll via GetOffsets until complete
         if (job_id.empty()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            auto response = api_->GetOffsets(timestamp, query);
-            if (response.type == Api::OffsetsResponse::Type::SUCCESS) {
-                result = *response.data;
-                return true;
+            for (int i = 0; i < 120; i++) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                auto response = api_->GetOffsets(timestamp, query);
+                printf("[poll] attempt %d, response type: %d\n", i + 1,
+                       static_cast<int>(response.type));
+                switch (response.type) {
+                    case Api::OffsetsResponse::Type::SUCCESS:
+                        result = *response.data;
+                        return true;
+                    case Api::OffsetsResponse::Type::WAIT:
+                        break;  // keep polling
+                    case Api::OffsetsResponse::Type::SEND_DATA: {
+                        std::vector<uint8_t> regions;
+                        if (!ReadHeapRegions(response.min_size,
+                                             response.max_size, regions)) {
+                            return false;
+                        }
+                        std::vector<uint8_t> compressed;
+                        if (!Compress(regions, compressed)) {
+                            return false;
+                        }
+                        regions.clear();
+                        regions.shrink_to_fit();
+                        std::string new_job_id;
+                        if (!api_->UploadMemory(
+                                response.job_id, compressed.data(),
+                                compressed.size(), new_job_id)) {
+                            return false;
+                        }
+                        // Switch to job-based polling
+                        return PollUntilDone(new_job_id, timestamp, query,
+                                             result);
+                    }
+                    default:
+                        printf("[poll] unexpected response type %d, giving up\n",
+                               static_cast<int>(response.type));
+                        return false;
+                }
             }
+            printf(
+                "[siegedb::SiegeDB::PollUntilDone] timed out waiting for "
+                "analysis\n");
             return false;
         }
 
@@ -157,9 +312,15 @@ namespace siegedb {
                             "heap regions\n");
                         return false;
                     }
+                    std::vector<uint8_t> compressed;
+                    if (!Compress(regions, compressed)) {
+                        return false;
+                    }
+                    regions.clear();
+                    regions.shrink_to_fit();
                     std::string new_job_id;
-                    if (!api_->UploadMemory(current_job, regions.data(),
-                                            regions.size(), new_job_id)) {
+                    if (!api_->UploadMemory(current_job, compressed.data(),
+                                            compressed.size(), new_job_id)) {
                         return false;
                     }
                     current_job = new_job_id;
@@ -242,18 +403,100 @@ namespace siegedb {
         return nt_header;
     }
 
-    bool SiegeDB::ReadDump(std::vector<uint8_t>& out) {
-        auto nt = GetNtHeaders();
-        if (!nt.Signature) {
+    bool SiegeDB::ReadSections(std::vector<uint8_t>& out) {
+        constexpr size_t kHeaderSize = 0x1000;
+
+        // Read PE headers
+        std::vector<uint8_t> headers(kHeaderSize);
+        if (!ReadProcessMemory(h_proc_, reinterpret_cast<void*>(image_base_),
+                               headers.data(), kHeaderSize, nullptr)) {
+            printf("[siegedb::SiegeDB::ReadSections] failed to read headers\n");
             return false;
         }
-        size_t image_size = nt.OptionalHeader.SizeOfImage;
+
+        // Parse DOS header
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(headers.data());
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+            return false;
+        }
+
+        // Parse NT headers
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(headers.data() +
+                                                         dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) {
+            return false;
+        }
+
+        size_t image_size = nt->OptionalHeader.SizeOfImage;
         if (!image_size) {
             return false;
         }
+
+        // Allocate zero-filled buffer
         out.resize(image_size, 0);
-        ReadProcessMemory(h_proc_, reinterpret_cast<void*>(image_base_),
-                          out.data(), image_size, nullptr);
+
+        // Copy headers
+        std::memcpy(out.data(), headers.data(), kHeaderSize);
+
+        // Walk section table
+        auto* section = IMAGE_FIRST_SECTION(nt);
+        uint16_t num_sections = nt->FileHeader.NumberOfSections;
+
+        for (uint16_t i = 0; i < num_sections; i++) {
+            char name[9] = {};
+            std::memcpy(name, section[i].Name, 8);
+
+            if (std::strcmp(name, ".text") == 0 ||
+                std::strcmp(name, ".data") == 0 ||
+                std::strcmp(name, ".rdata") == 0) {
+                uint32_t va = section[i].VirtualAddress;
+                uint32_t size = section[i].Misc.VirtualSize;
+
+                if (va + size > image_size) {
+                    continue;
+                }
+
+                ReadProcessMemory(h_proc_,
+                                  reinterpret_cast<void*>(image_base_ + va),
+                                  out.data() + va, size, nullptr);
+
+                printf("[siegedb::SiegeDB::ReadSections] read %s (%u bytes)\n",
+                       name, size);
+            }
+        }
+
+        return true;
+    }
+
+    bool SiegeDB::Compress(const std::vector<uint8_t>& in,
+                           std::vector<uint8_t>& out) {
+        z_stream strm{};
+        if (deflateInit(&strm, Z_BEST_SPEED) != Z_OK) {
+            printf("[siegedb::SiegeDB::Compress] deflateInit failed\n");
+            return false;
+        }
+
+        out.resize(deflateBound(&strm, static_cast<uLong>(in.size())));
+        strm.next_out = out.data();
+        strm.avail_out = static_cast<uInt>(out.size());
+
+        constexpr size_t kChunk = 4 * 1024 * 1024;  // 4MB input chunks
+        size_t offset = 0;
+        while (offset < in.size()) {
+            size_t remaining = in.size() - offset;
+            size_t chunk = std::min(kChunk, remaining);
+            strm.next_in = const_cast<Bytef*>(in.data() + offset);
+            strm.avail_in = static_cast<uInt>(chunk);
+            bool last = (offset + chunk >= in.size());
+            deflate(&strm, last ? Z_FINISH : Z_NO_FLUSH);
+            offset += chunk;
+            printf("\r[compress] %zu / %zu MB (%.0f%%)", offset / (1024 * 1024),
+                   in.size() / (1024 * 1024), 100.0 * offset / in.size());
+            fflush(stdout);
+        }
+        printf("\n");
+        out.resize(strm.total_out);
+        deflateEnd(&strm);
         return true;
     }
 

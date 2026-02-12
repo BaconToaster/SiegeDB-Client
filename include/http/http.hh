@@ -28,18 +28,19 @@ namespace http {
         static std::unique_ptr<Http> New();
 
         void SetHeader(const std::string& key, const std::string& value);
+        const std::vector<std::string>& GetHeaders() const;
 
         Response Get(const std::string& url);
         Response Post(const std::string& url, const nlohmann::json& body);
         Response PostRaw(const std::string& url, const uint8_t* data,
-                         size_t size);
+                         size_t size, bool compressed = false);
 
     private:
         Http();
 
         Response Perform(const std::string& url, const std::string* post_data,
                          const uint8_t* raw_data = nullptr,
-                         size_t raw_size = 0);
+                         size_t raw_size = 0, bool compressed = false);
         static size_t WriteCallback(char* ptr, size_t size, size_t nmemb,
                                     void* userdata);
         static int ProgressCallback(void* clientp, curl_off_t dltotal,

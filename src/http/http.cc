@@ -36,14 +36,18 @@ namespace http {
         headers_.push_back(key + ": " + value);
     }
 
+    const std::vector<std::string>& Http::GetHeaders() const {
+        return headers_;
+    }
+
     Response Http::Get(const std::string& url) { return Perform(url, nullptr); }
     Response Http::Post(const std::string& url, const nlohmann::json& body) {
         std::string data = body.dump();
         return Perform(url, &data);
     }
     Response Http::PostRaw(const std::string& url, const uint8_t* data,
-                           size_t size) {
-        return Perform(url, nullptr, data, size);
+                           size_t size, bool compressed) {
+        return Perform(url, nullptr, data, size, compressed);
     }
 
     Http::Http() : curl_(nullptr), upload_done_(false) {}
@@ -76,7 +80,8 @@ namespace http {
         return 0;
     }
     Response Http::Perform(const std::string& url, const std::string* post_data,
-                           const uint8_t* raw_data, size_t raw_size) {
+                           const uint8_t* raw_data, size_t raw_size,
+                           bool compressed) {
         curl_easy_reset(curl_);
 
         std::string response_body;
@@ -90,6 +95,10 @@ namespace http {
         if (raw_data) {
             headers = curl_slist_append(
                 headers, "Content-Type: application/octet-stream");
+            if (compressed) {
+                headers = curl_slist_append(
+                    headers, "X-Content-Encoding: zlib");
+            }
         } else {
             headers =
                 curl_slist_append(headers, "Content-Type: application/json");

@@ -33,7 +33,9 @@ namespace siegedb {
         uint64_t GetModuleBase(const std::string& module_name);
         IMAGE_NT_HEADERS64 GetNtHeaders();
 
-        bool ReadDump(std::vector<uint8_t>& out);
+        bool ReadSections(std::vector<uint8_t>& out);
+        static bool Compress(const std::vector<uint8_t>& in,
+                              std::vector<uint8_t>& out);
         bool ReadHeapRegions(size_t min_size, size_t max_size,
                              std::vector<uint8_t>& out);
         bool PollUntilDone(const std::string& job_id, uint32_t timestamp,

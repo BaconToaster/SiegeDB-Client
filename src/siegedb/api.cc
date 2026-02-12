@@ -53,9 +53,14 @@ namespace siegedb {
                 }
                 return {OffsetsResponse::Type::UNKNOWN};
             case 404:
+                printf("[siegedb::Api::GetOffsets] 404: %s - %s\n",
+                       res.body.value("error", "unknown").c_str(),
+                       res.body.value("message", "").c_str());
                 return {OffsetsResponse::Type::NOT_FOUND, std::nullopt,
                         res.body.value("upload_token", "")};
             default:
+                printf("[siegedb::Api::GetOffsets] unexpected status %ld: %s\n",
+                       res.status_code, res.body.dump().c_str());
                 return {OffsetsResponse::Type::FAIL};
         }
     }
@@ -63,7 +68,7 @@ namespace siegedb {
     bool Api::Upload(const std::string& upload_token, const uint8_t* data,
                      size_t size, std::string& job_id) {
         http_->SetHeader("X-Upload-Token", upload_token);
-        auto res = PostRaw("/upload", data, size);
+        auto res = PostRaw("/upload", data, size, true);
         if (!res.error.empty() || res.status_code != 202) {
             printf("[siegedb::Api::Upload] upload failed: %s\n",
                    res.error.empty() ? "unexpected status code"
@@ -76,7 +81,7 @@ namespace siegedb {
 
     bool Api::UploadMemory(const std::string& job_id, const uint8_t* data,
                            size_t size, std::string& new_job_id) {
-        auto res = PostRaw("/memory/" + job_id, data, size);
+        auto res = PostRaw("/memory/" + job_id, data, size, true);
         if (!res.error.empty() || res.status_code != 202) {
             printf("[siegedb::Api::UploadMemory] upload failed: %s\n",
                    res.error.empty() ? "unexpected status code"
@@ -119,6 +124,52 @@ namespace siegedb {
         return sr;
     }
 
+    std::optional<std::string> Api::InitUpload(
+        const std::string& upload_token, uint32_t chunk_total) {
+        http_->SetHeader("X-Upload-Token", upload_token);
+        nlohmann::json body = {{"chunk_total", chunk_total}};
+        auto res = Post("/upload/init", body);
+        if (!res.error.empty() || res.status_code != 202) {
+            printf("[siegedb::Api::InitUpload] init failed: %s\n",
+                   res.error.empty() ? "unexpected status code"
+                                     : res.error.c_str());
+            return std::nullopt;
+        }
+        std::string upload_id = res.body.value("upload_id", "");
+        if (upload_id.empty()) {
+            printf("[siegedb::Api::InitUpload] no upload_id in response\n");
+            return std::nullopt;
+        }
+        return upload_id;
+    }
+
+    bool Api::UploadChunk(const std::string& upload_id, uint32_t chunk_index,
+                          const uint8_t* data, size_t size) {
+        auto res = PostRaw(
+            "/upload/" + upload_id + "/" + std::to_string(chunk_index),
+            data, size, false);
+        if (!res.error.empty() ||
+            (res.status_code != 200 && res.status_code != 202)) {
+            printf("[siegedb::Api::UploadChunk] chunk %u failed: %s\n",
+                   chunk_index,
+                   res.error.empty() ? "unexpected status code"
+                                     : res.error.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    std::string Api::GetAuthHeader() const {
+        for (const auto& h : http_->GetHeaders()) {
+            if (h.rfind("Authorization: ", 0) == 0) {
+                return h;
+            }
+        }
+        return "";
+    }
+
+    std::string Api::GetUrl() const { return url_; }
+
     Api::Api() : http_(nullptr) {}
 
     bool Api::CheckHealth() {
@@ -134,7 +185,8 @@ namespace siegedb {
         return http_->Post(url_ + endpoint, body);
     }
     http::Response Api::PostRaw(const std::string& endpoint,
-                                const uint8_t* data, size_t size) {
-        return http_->PostRaw(url_ + endpoint, data, size);
+                                const uint8_t* data, size_t size,
+                                bool compressed) {
+        return http_->PostRaw(url_ + endpoint, data, size, compressed);
     }
 }  // namespace siegedb
