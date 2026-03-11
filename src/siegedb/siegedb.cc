@@ -448,7 +448,8 @@ namespace siegedb {
 
             if (std::strcmp(name, ".text") == 0 ||
                 std::strcmp(name, ".data") == 0 ||
-                std::strcmp(name, ".rdata") == 0) {
+                std::strcmp(name, ".rdata") == 0 ||
+                std::strcmp(name, ".tls") == 0) {
                 uint32_t va = section[i].VirtualAddress;
                 uint32_t size = section[i].Misc.VirtualSize;
 
