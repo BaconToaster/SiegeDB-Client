@@ -44,12 +44,27 @@ namespace siegedb {
                 }
                 if (status == "awaiting_data") {
                     auto& dr = res.body["data_request"];
+                    std::vector<SizeRange> ranges;
+                    if (dr.contains("size_ranges") && dr["size_ranges"].is_array()) {
+                        for (const auto& r : dr["size_ranges"]) {
+                            ranges.push_back({r.value("min_size", size_t{0}),
+                                              r.value("max_size", size_t{0})});
+                        }
+                    }
+                    std::vector<DirectRead> reads;
+                    if (dr.contains("reads") && dr["reads"].is_array()) {
+                        for (const auto& rd : dr["reads"]) {
+                            reads.push_back(
+                                {rd.value("address", uint64_t{0}),
+                                 rd.value("size", size_t{0})});
+                        }
+                    }
                     return {OffsetsResponse::Type::SEND_DATA,
                             std::nullopt,
                             std::nullopt,
                             res.body.value("job_id", ""),
-                            dr.value("min_size", size_t{0}),
-                            dr.value("max_size", size_t{0})};
+                            std::move(ranges),
+                            std::move(reads)};
                 }
                 return {OffsetsResponse::Type::UNKNOWN};
             case 404:
@@ -118,8 +133,20 @@ namespace siegedb {
         if (s == StatusResponse::Status::AWAITING_DATA &&
             res.body.contains("data_request")) {
             auto& dr = res.body["data_request"];
-            sr.min_size = dr.value("min_size", size_t{0});
-            sr.max_size = dr.value("max_size", size_t{0});
+            if (dr.contains("size_ranges") && dr["size_ranges"].is_array()) {
+                for (const auto& r : dr["size_ranges"]) {
+                    sr.size_ranges.push_back(
+                        {r.value("min_size", size_t{0}),
+                         r.value("max_size", size_t{0})});
+                }
+            }
+            if (dr.contains("reads") && dr["reads"].is_array()) {
+                for (const auto& rd : dr["reads"]) {
+                    sr.reads.push_back(
+                        {rd.value("address", uint64_t{0}),
+                         rd.value("size", size_t{0})});
+                }
+            }
         }
         return sr;
     }

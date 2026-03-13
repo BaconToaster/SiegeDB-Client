@@ -6,10 +6,21 @@
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "http/http.hh"
 
 namespace siegedb {
+    struct SizeRange {
+        size_t min_size = 0;
+        size_t max_size = 0;
+    };
+
+    struct DirectRead {
+        uint64_t address = 0;
+        size_t size = 0;
+    };
+
     class Api {
     public:
         struct OffsetsResponse {
@@ -26,8 +37,8 @@ namespace siegedb {
             std::optional<nlohmann::json> data;
             std::optional<std::string> upload_token;
             std::string job_id;
-            size_t min_size = 0;
-            size_t max_size = 0;
+            std::vector<SizeRange> size_ranges;
+            std::vector<DirectRead> reads;
         };
 
         struct StatusResponse {
@@ -43,8 +54,8 @@ namespace siegedb {
             Status status;
             std::string job_id;
             std::string error_message;
-            size_t min_size = 0;
-            size_t max_size = 0;
+            std::vector<SizeRange> size_ranges;
+            std::vector<DirectRead> reads;
         };
 
         Api(const Api&) = delete;

@@ -36,7 +36,8 @@ namespace siegedb {
         bool ReadSections(std::vector<uint8_t>& out);
         static bool Compress(const std::vector<uint8_t>& in,
                               std::vector<uint8_t>& out);
-        bool ReadHeapRegions(size_t min_size, size_t max_size,
+        bool ReadHeapRegions(const std::vector<SizeRange>& ranges,
+                             const std::vector<DirectRead>& reads,
                              std::vector<uint8_t>& out);
         bool PollUntilDone(const std::string& job_id, uint32_t timestamp,
                            const std::string& query, nlohmann::json& result);

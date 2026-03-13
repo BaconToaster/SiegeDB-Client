@@ -211,8 +211,7 @@ namespace siegedb {
             }
             case Api::OffsetsResponse::Type::SEND_DATA: {
                 std::vector<uint8_t> regions;
-                if (!ReadHeapRegions(response.min_size, response.max_size,
-                                     regions)) {
+                if (!ReadHeapRegions(response.size_ranges, response.reads, regions)) {
                     printf(
                         "[siegedb::SiegeDB::GetOffsets] failed to read heap "
                         "regions\n");
@@ -258,8 +257,7 @@ namespace siegedb {
                         break;  // keep polling
                     case Api::OffsetsResponse::Type::SEND_DATA: {
                         std::vector<uint8_t> regions;
-                        if (!ReadHeapRegions(response.min_size,
-                                             response.max_size, regions)) {
+                        if (!ReadHeapRegions(response.size_ranges, response.reads, regions)) {
                             return false;
                         }
                         std::vector<uint8_t> compressed;
@@ -305,8 +303,7 @@ namespace siegedb {
                 }
                 case Api::StatusResponse::Status::AWAITING_DATA: {
                     std::vector<uint8_t> regions;
-                    if (!ReadHeapRegions(status.min_size, status.max_size,
-                                         regions)) {
+                    if (!ReadHeapRegions(status.size_ranges, status.reads, regions)) {
                         printf(
                             "[siegedb::SiegeDB::PollUntilDone] failed to read "
                             "heap regions\n");
@@ -501,7 +498,8 @@ namespace siegedb {
         return true;
     }
 
-    bool SiegeDB::ReadHeapRegions(size_t min_size, size_t max_size,
+    bool SiegeDB::ReadHeapRegions(const std::vector<SizeRange>& ranges,
+                                  const std::vector<DirectRead>& reads,
                                   std::vector<uint8_t>& out) {
         typedef NTSTATUS(NTAPI * QueryVMInfo)(HANDLE, PVOID, uint32_t, PVOID,
                                               SIZE_T, PSIZE_T);
@@ -525,8 +523,17 @@ namespace siegedb {
                 break;
             }
 
+            bool matches = false;
+            for (const auto& r : ranges) {
+                if (mbi.RegionSize >= r.min_size &&
+                    mbi.RegionSize <= r.max_size) {
+                    matches = true;
+                    break;
+                }
+            }
+
             if (mbi.Protect == PAGE_READWRITE && mbi.State == MEM_COMMIT &&
-                mbi.RegionSize >= min_size && mbi.RegionSize <= max_size) {
+                matches) {
                 Region region;
                 region.base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
                 region.size = mbi.RegionSize;
@@ -542,6 +549,24 @@ namespace siegedb {
                 }
             }
             address = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+        }
+
+        // Direct reads at specific addresses
+        for (const auto& rd : reads) {
+            Region region;
+            region.base = rd.address;
+            region.size = rd.size;
+            region.data.resize(rd.size);
+            SIZE_T bytes_read = 0;
+            if (ReadProcessMemory(h_proc_,
+                                  reinterpret_cast<void*>(rd.address),
+                                  region.data.data(), rd.size,
+                                  &bytes_read) &&
+                bytes_read > 0) {
+                region.data.resize(bytes_read);
+                region.size = bytes_read;
+                regions.push_back(std::move(region));
+            }
         }
 
         if (regions.empty()) {
