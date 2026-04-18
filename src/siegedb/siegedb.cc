@@ -214,7 +214,8 @@ namespace siegedb {
                 if (!ReadHeapRegions(response.size_ranges, response.reads, regions)) {
                     printf(
                         "[siegedb::SiegeDB::GetOffsets] failed to read heap "
-                        "regions\n");
+                        "regions -- uploading empty marker\n");
+                    UploadEmptyRegions(response.job_id);
                     return nullptr;
                 }
                 std::vector<uint8_t> compressed;
@@ -258,6 +259,7 @@ namespace siegedb {
                     case Api::OffsetsResponse::Type::SEND_DATA: {
                         std::vector<uint8_t> regions;
                         if (!ReadHeapRegions(response.size_ranges, response.reads, regions)) {
+                            UploadEmptyRegions(response.job_id);
                             return false;
                         }
                         std::vector<uint8_t> compressed;
@@ -306,7 +308,8 @@ namespace siegedb {
                     if (!ReadHeapRegions(status.size_ranges, status.reads, regions)) {
                         printf(
                             "[siegedb::SiegeDB::PollUntilDone] failed to read "
-                            "heap regions\n");
+                            "heap regions -- uploading empty marker\n");
+                        UploadEmptyRegions(current_job);
                         return false;
                     }
                     std::vector<uint8_t> compressed;
@@ -498,6 +501,23 @@ namespace siegedb {
         return true;
     }
 
+    bool SiegeDB::UploadEmptyRegions(const std::string& job_id) {
+        // [uint32_t count = 0]
+        std::vector<uint8_t> empty_payload(sizeof(uint32_t), 0);
+        std::vector<uint8_t> compressed;
+        if (!Compress(empty_payload, compressed)) {
+            return false;
+        }
+        std::string new_job_id;
+        bool ok = api_->UploadMemory(job_id, compressed.data(),
+                                     compressed.size(), new_job_id);
+        if (ok) {
+            printf("[siegedb] uploaded empty-regions marker -- server "
+                   "will fail build\n");
+        }
+        return ok;
+    }
+
     bool SiegeDB::ReadHeapRegions(const std::vector<SizeRange>& ranges,
                                   const std::vector<DirectRead>& reads,
                                   std::vector<uint8_t>& out) {
@@ -551,17 +571,55 @@ namespace siegedb {
             address = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
         }
 
-        // Direct reads at specific addresses
+        // Direct reads at specific addresses.
+        // For each address, query the full committed region
+        // containing it via VirtualQuery, then read the entire
+        // region. This captures hash table bucket arrays and
+        // other allocations adjacent to the requested data.
         for (const auto& rd : reads) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            size_t mbi_size = 0;
+            NTSTATUS nt_status = NtQueryVirtualMemory(
+                h_proc_, reinterpret_cast<void*>(rd.address),
+                0, &mbi, sizeof(mbi), &mbi_size);
+
+            uint64_t read_base = rd.address;
+            size_t read_size = rd.size;
+
+            if (nt_status >= 0 &&
+                mbi.State == MEM_COMMIT) {
+                // Use the full committed region
+                uint64_t region_base =
+                    reinterpret_cast<uint64_t>(
+                        mbi.BaseAddress);
+                uint64_t region_end =
+                    region_base + mbi.RegionSize;
+
+                // Ensure the requested range is covered
+                if (region_base <= rd.address &&
+                    region_end >= rd.address + rd.size) {
+                    read_base = region_base;
+                    read_size = mbi.RegionSize;
+                }
+
+                printf(
+                    "[read-region] requested=0x%llX "
+                    "region=0x%llX-0x%llX (%zu KB)\n",
+                    rd.address, read_base,
+                    read_base + read_size,
+                    read_size / 1024);
+            }
+
             Region region;
-            region.base = rd.address;
-            region.size = rd.size;
-            region.data.resize(rd.size);
+            region.base = read_base;
+            region.size = read_size;
+            region.data.resize(read_size);
             SIZE_T bytes_read = 0;
-            if (ReadProcessMemory(h_proc_,
-                                  reinterpret_cast<void*>(rd.address),
-                                  region.data.data(), rd.size,
-                                  &bytes_read) &&
+            if (ReadProcessMemory(
+                    h_proc_,
+                    reinterpret_cast<void*>(read_base),
+                    region.data.data(), read_size,
+                    &bytes_read) &&
                 bytes_read > 0) {
                 region.data.resize(bytes_read);
                 region.size = bytes_read;

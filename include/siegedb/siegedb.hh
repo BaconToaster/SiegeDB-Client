@@ -39,6 +39,10 @@ namespace siegedb {
         bool ReadHeapRegions(const std::vector<SizeRange>& ranges,
                              const std::vector<DirectRead>& reads,
                              std::vector<uint8_t>& out);
+        // Upload a zero-region payload to tell the server the
+        // client could not satisfy the memory request. Server
+        // will mark the build as failed.
+        bool UploadEmptyRegions(const std::string& job_id);
         bool PollUntilDone(const std::string& job_id, uint32_t timestamp,
                            const std::string& query, nlohmann::json& result);
 
